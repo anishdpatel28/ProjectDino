@@ -48,12 +48,13 @@ jobs:
             Library-${{ matrix.testMode }}-
             Library-
 
-      # Step 3 – Activate Unity using online credentials (Personal license, Google SSO account).
-      # Required secrets: UNITY_EMAIL, UNITY_PASSWORD
-      # Go to id.unity.com → Security → Set Password to create a password for your Google-linked account.
+      # Step 3 – Activate Unity (Personal License – online).
+      # UNITY_LICENSE = contents of UnityEntitlementLicense.xml (tells game-ci this is a Personal license).
+      # UNITY_EMAIL + UNITY_PASSWORD = your Unity account credentials for online activation.
       - name: Activate Unity (Personal License – online)
         uses: game-ci/unity-activate@v2
         env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
 
@@ -62,6 +63,7 @@ jobs:
         uses: game-ci/unity-test-runner@v4
         id: tests
         env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
         with:
@@ -108,11 +110,11 @@ jobs:
             Library-Build-
             Library-
 
-      # Step 3 – Activate Unity using online credentials (Personal license, Google SSO account).
-      # Required secrets: UNITY_EMAIL, UNITY_PASSWORD
+      # Step 3 – Activate Unity (Personal License – online).
       - name: Activate Unity (Personal License – online)
         uses: game-ci/unity-activate@v2
         env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
 
@@ -120,6 +122,7 @@ jobs:
       - name: Build Windows Standalone
         uses: game-ci/unity-builder@v4
         env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
         with:
