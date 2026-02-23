@@ -50,9 +50,59 @@ jobs:
             Library-${{ matrix.testMode }}-
             Library-
 
-      # Step 3 – Run the Unity Test Runner for the current matrix test mode
-      # unity-test-runner@v4 handles Unity activation internally using the credentials below.
-      - name: Run ${{ matrix.testMode }} tests  # Step 3
+      # Step 3 – Patch game-ci's activate.sh so Unity 6 Personal license works.
+      # Root cause: game-ci extracts a garbage serial ("x") from UnityEntitlementLicense.xml
+      # and passes it as -serial "x" to unity-editor. Unity 6 fails with Code 20110
+      # (serial invalid) because Personal plans have no serial.
+      # Fix: replace activate.sh with a version that uses email+password only (no serial).
+      - name: Patch game-ci activate.sh for Unity 6 Personal License
+        run: |
+          SCRIPT="/home/runner/work/_actions/game-ci/unity-test-runner/v4/dist/platforms/ubuntu/activate.sh"
+          cat > "$SCRIPT" << 'PATCHEOF'
+          #!/usr/bin/env bash
+          if [[ -n "$UNITY_EMAIL" && -n "$UNITY_PASSWORD" ]]; then
+            echo "Requesting activation (Unity 6 Personal – entitlement, no serial)"
+            retry_count=0
+            delay=15
+            while [[ $retry_count -lt 5 ]]; do
+              unity-editor \
+                -logFile /dev/stdout \
+                -quit \
+                -username "$UNITY_EMAIL" \
+                -password "$UNITY_PASSWORD" \
+                -projectPath "/BlankProject"
+              UNITY_EXIT_CODE=$?
+              if [[ $UNITY_EXIT_CODE -eq 0 ]]; then
+                echo "Activation successful"
+                break
+              else
+                ((retry_count++))
+                echo "::warning ::Activation failed, attempting retry #$retry_count"
+                echo "Activation failed, retrying in $delay seconds..."
+                sleep $delay
+                delay=$((delay * 2))
+              fi
+            done
+            if [[ $retry_count -eq 5 ]]; then
+              echo "Activation failed after 5 retries"
+            fi
+          else
+            echo "::error ::UNITY_EMAIL and UNITY_PASSWORD must be set."
+            exit 1
+          fi
+          if [[ $UNITY_EXIT_CODE -eq 0 ]]; then
+            echo "Activation complete."
+          else
+            echo "Unclassified error occurred while trying to activate license."
+            echo "Exit code was: $UNITY_EXIT_CODE"
+            echo "::error ::There was an error while trying to activate the Unity license."
+            exit $UNITY_EXIT_CODE
+          fi
+          PATCHEOF
+          chmod +x "$SCRIPT"
+
+      # Step 4 – Run the Unity Test Runner for the current matrix test mode
+      - name: Run ${{ matrix.testMode }} tests
         uses: game-ci/unity-test-runner@v4
         id: tests
         env:
@@ -67,7 +117,7 @@ jobs:
           githubToken: ${{ secrets.GITHUB_TOKEN }}
           checkName: ${{ matrix.testMode }} Test Results
 
-      # Step 4 – Upload the NUnit XML test results as a build artifact
+      # Step 5 – Upload the NUnit XML test results as a build artifact
       - name: Upload test results
         uses: actions/upload-artifact@v4
         if: always()   # Upload even when tests fail so we can inspect failures
@@ -103,9 +153,57 @@ jobs:
             Library-Build-
             Library-
 
-      # Step 3 – Build the project for Windows Standalone (64-bit)
-      # unity-builder@v4 handles Unity activation internally using the credentials below.
-      - name: Build Windows Standalone  # Step 3
+      # Step 3 – Patch game-ci's activate.sh (same fix as in the test job)
+      - name: Patch game-ci activate.sh for Unity 6 Personal License
+        run: |
+          SCRIPT="/home/runner/work/_actions/game-ci/unity-builder/v4/dist/platforms/ubuntu/steps/activate.sh"
+          cat > "$SCRIPT" << 'PATCHEOF'
+          #!/usr/bin/env bash
+          if [[ ! -d "/BlankProject" ]]; then mkdir /BlankProject; fi
+          if [[ ! -d "/BlankProject/Assets" ]]; then mkdir /BlankProject/Assets; fi
+          if [[ -n "$UNITY_EMAIL" && -n "$UNITY_PASSWORD" ]]; then
+            echo "Requesting activation (Unity 6 Personal – entitlement, no serial)"
+            retry_count=0
+            delay=15
+            while [[ $retry_count -lt 5 ]]; do
+              unity-editor \
+                -logFile /dev/stdout \
+                -quit \
+                -username "$UNITY_EMAIL" \
+                -password "$UNITY_PASSWORD" \
+                -projectPath "/BlankProject"
+              UNITY_EXIT_CODE=$?
+              if [[ $UNITY_EXIT_CODE -eq 0 ]]; then
+                echo "Activation successful"
+                break
+              else
+                ((retry_count++))
+                echo "::warning ::Activation failed, attempting retry #$retry_count"
+                echo "Activation failed, retrying in $delay seconds..."
+                sleep $delay
+                delay=$((delay * 2))
+              fi
+            done
+            if [[ $retry_count -eq 5 ]]; then
+              echo "Activation failed after 5 retries"
+            fi
+          else
+            echo "::error ::UNITY_EMAIL and UNITY_PASSWORD must be set."
+            exit 1
+          fi
+          if [[ $UNITY_EXIT_CODE -eq 0 ]]; then
+            echo "Activation complete."
+          else
+            echo "Unclassified error occurred while trying to activate license."
+            echo "Exit code was: $UNITY_EXIT_CODE"
+            echo "::error ::There was an error while trying to activate the Unity license."
+            exit $UNITY_EXIT_CODE
+          fi
+          PATCHEOF
+          chmod +x "$SCRIPT"
+
+      # Step 4 – Build the project for Windows Standalone (64-bit)
+      - name: Build Windows Standalone
         uses: game-ci/unity-builder@v4
         env:
           UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
@@ -117,7 +215,7 @@ jobs:
           # The output folder inside the runner; artifacts are uploaded next
           buildsPath: build
 
-      # Step 4 – Upload the compiled Windows build as a downloadable artifact
+      # Step 5 – Upload the compiled Windows build as a downloadable artifact
       - name: Upload Windows build artifact
         uses: actions/upload-artifact@v4
         with:
