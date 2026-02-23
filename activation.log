@@ -1,0 +1,14 @@
+[Licensing::Module] Trying to connect to existing licensing client channel...
+[Licensing::IpcConnector] Successfully connected to: "LicenseClient-anish" at "2026-02-23T04:59:12.8879563Z"
+[Licensing::Client] Handshaking with LicensingClient:
+  Version:                 1.17.4+4293ba1
+  Session Id:              bdf6bd558b2d4a9c83363eef5d88cc80
+  Correlation Id:          3a7c0cf2fa210a2add07b7fed5e41df4
+  External correlation Id: 2862298816687139752
+  Machine Id:              Ckb8KXblnu/jJXNuM/RqO8yOhz0=
+[Licensing::Module] Successfully connected to LicensingClient on channel: "LicenseClient-anish" (connect: 0.00s, validation: 0.00s, handshake: 0.95s)
+[Licensing::IpcConnector] Successfully connected to: "LicenseClient-anish-notifications" at "2026-02-23T04:59:13.8372792Z"
+[Licensing::Module] Generating manual activation license file: C:\Users\anish\Documents\UnityProjects\ProjectDino/Unity_v6000.3.9f1.alf
+[Licensing::Client] Successfully processed ALF generation request: C:\Users\anish\Documents\UnityProjects\ProjectDino\Unity_v6000.3.9f1.alf
+[Licensing::Module] Manual activation license file successfully saved.
+Exiting without the bug reporter. Application will terminate with return code 0
