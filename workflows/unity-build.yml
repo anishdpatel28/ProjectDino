@@ -11,7 +11,7 @@ on:
 
 env:
   # Set your Unity version here once and reuse it across all jobs
-  UNITY_VERSION: 6000.0.32f1
+  UNITY_VERSION: 6000.3.9f1
 
 jobs:
   # ─────────────────────────────────────────────────────────────
@@ -47,12 +47,12 @@ jobs:
             Library-${{ matrix.testMode }}-
             Library-
 
-      # Step 3 – Activate Unity with a personal license stored in GitHub Secrets
-      # Required secrets: UNITY_LICENSE, UNITY_EMAIL, UNITY_PASSWORD
-      - name: Activate Unity (Personal License)
+      # Step 3 – Activate Unity using online credentials (Personal license, Google SSO account).
+      # Required secrets: UNITY_EMAIL, UNITY_PASSWORD
+      # Go to id.unity.com → Security → Set Password to create a password for your Google-linked account.
+      - name: Activate Unity (Personal License – online)
         uses: game-ci/unity-activate@v2
         env:
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
 
@@ -61,7 +61,6 @@ jobs:
         uses: game-ci/unity-test-runner@v4
         id: tests
         env:
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
         with:
@@ -108,12 +107,11 @@ jobs:
             Library-Build-
             Library-
 
-      # Step 3 – Activate Unity with a personal license stored in GitHub Secrets
-      # Required secrets: UNITY_LICENSE, UNITY_EMAIL, UNITY_PASSWORD
-      - name: Activate Unity (Personal License)
+      # Step 3 – Activate Unity using online credentials (Personal license, Google SSO account).
+      # Required secrets: UNITY_EMAIL, UNITY_PASSWORD
+      - name: Activate Unity (Personal License – online)
         uses: game-ci/unity-activate@v2
         env:
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
 
@@ -121,7 +119,6 @@ jobs:
       - name: Build Windows Standalone
         uses: game-ci/unity-builder@v4
         env:
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
         with:
