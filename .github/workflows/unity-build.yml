@@ -8,6 +8,7 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 env:
   # Set your Unity version here once and reuse it across all jobs
