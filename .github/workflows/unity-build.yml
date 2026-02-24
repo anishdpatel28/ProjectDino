@@ -60,69 +60,83 @@ jobs:
         env:
           UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
 
-      # Patch game-ci's activate.sh with a strategy that works for Unity 6 Personal licenses.
+      # Patch game-ci's activate.sh with a two-step strategy for Unity 6 Personal licenses.
       #
       # Background:
-      #   - game-ci passes UNITY_SERIAL=x to the container (extracted from UnityEntitlementLicense.xml
-      #     which has no real serial, so game-ci falls back to "x").
-      #   - Original activate.sh uses -serial "x" which triggers Unity's account-based entitlement
-      #     lookup. The lookup SUCCEEDS ("Successfully activated the entitlement license") because
-      #     the server uses email/password auth to find the account's Personal plan entitlements.
-      #     BUT THEN Unity validates the serial "x" → fails with Code 20110 (serial invalid).
-      #   - Our previous fix removed -serial, using email+password only. But without a serial,
-      #     Unity's server does a machine-ID lookup instead of account lookup, and the CI runner's
-      #     machine ID has no registered entitlements → Code 404.
-      #
-      # New strategy:
-      #   - Keep -serial "$UNITY_SERIAL" (which is "x") to trigger the account-based entitlement lookup.
-      #   - Capture the log and check for "Successfully activated the entitlement license".
-      #   - If found, exit 0 immediately (tolerate Code 20110; the LicensingClient wrote its state).
-      #   - If not found (genuine Code 404 / network issue), retry up to 5 times.
-      #   - The test runner (run_tests.sh, same Docker container) will find whatever the
-      #     LicensingClient wrote to /root/.local/share/unity3d/ during the activation window.
+      #   - game-ci passes UNITY_SERIAL=x (no real serial in UnityEntitlementLicense.xml).
+      #   - Step 1 (serial path): -serial "x" triggers an account-based server lookup that finds
+      #     the Personal plan's entitlements (including com.unity.editor.headless) and REGISTERS
+      #     the CI machine on Unity's licensing server. Code 20110 (serial invalid) is returned,
+      #     but the machine registration PERSISTS on the server (confirmed by deactivate.sh which
+      #     "Successfully returned the entitlement license" after tests finish).
+      #   - Step 2 (credential-only): With the machine now registered, a credential-only
+      #     activation (no serial) should authenticate, find the machine registration, and exit 0.
+      #     This writes the license state to disk in /root/.local/share/unity3d/ (persisted via
+      #     the _github_home volume mount), which the test runner's separate LicensingClient
+      #     process can then read without needing credentials.
       - name: Patch game-ci activate.sh for Unity 6 Personal License
         run: |
           SCRIPT="/home/runner/work/_actions/game-ci/unity-test-runner/v4/dist/platforms/ubuntu/activate.sh"
           cat > "$SCRIPT" << 'PATCHEOF'
           #!/usr/bin/env bash
-          if [[ -n "$UNITY_EMAIL" && -n "$UNITY_PASSWORD" ]]; then
-            echo "Requesting activation (Unity 6 Personal – serial path for account entitlement lookup)"
-            retry_count=0
-            delay=15
-            ACTIVATION_SUCCESS=false
-            while [[ $retry_count -lt 5 ]]; do
-              LOGFILE=$(mktemp /tmp/unity_act.XXXXXX)
-              unity-editor \
-                -logFile "$LOGFILE" \
-                -quit \
-                -username "$UNITY_EMAIL" \
-                -password "$UNITY_PASSWORD" \
-                -serial "${UNITY_SERIAL:-x}" \
-                -projectPath "/BlankProject" || true
-              cat "$LOGFILE"
-              if grep -q "Successfully activated the entitlement license" "$LOGFILE"; then
-                echo "Entitlement found and activated (Code 20110 serial mismatch is expected for Unity 6 Personal – tolerated)."
-                ACTIVATION_SUCCESS=true
-                rm -f "$LOGFILE"
-                break
-              else
-                rm -f "$LOGFILE"
-                ((retry_count++))
-                echo "::warning ::Entitlement not found (Code 404), retry #$retry_count"
-                echo "Retrying in $delay seconds..."
-                sleep $delay
-                delay=$((delay * 2))
-              fi
-            done
-            if [[ "$ACTIVATION_SUCCESS" != "true" ]]; then
-              echo "Activation failed: entitlement was never found after 5 attempts."
-              echo "::error ::There was an error while trying to activate the Unity license."
-              exit 1
-            fi
-          else
+          if [[ -z "$UNITY_EMAIL" || -z "$UNITY_PASSWORD" ]]; then
             echo "::error ::UNITY_EMAIL and UNITY_PASSWORD must be set."
             exit 1
           fi
+
+          # ── Step 1: Register this machine via the serial/account-based lookup ──────────
+          echo "=== Step 1: machine registration via serial path ==="
+          LOGFILE=$(mktemp /tmp/unity_act1.XXXXXX)
+          unity-editor \
+            -logFile "$LOGFILE" \
+            -quit \
+            -username "$UNITY_EMAIL" \
+            -password "$UNITY_PASSWORD" \
+            -serial "${UNITY_SERIAL:-x}" \
+            -projectPath "/BlankProject" || true
+          cat "$LOGFILE"
+          if ! grep -q "Successfully activated the entitlement license" "$LOGFILE"; then
+            echo "::error ::Step 1 failed: entitlement was not found via serial path."
+            rm -f "$LOGFILE"
+            exit 1
+          fi
+          echo "Step 1 complete: machine registered on Unity's server (Code 20110 serial mismatch is expected and tolerated)."
+          rm -f "$LOGFILE"
+
+          # ── Step 2: Credential-only activation now that the machine is registered ──────
+          echo "=== Step 2: credential-only activation (machine is now registered) ==="
+          retry_count=0
+          delay=5
+          ACTIVATION_SUCCESS=false
+          while [[ $retry_count -lt 3 ]]; do
+            LOGFILE=$(mktemp /tmp/unity_act2.XXXXXX)
+            unity-editor \
+              -logFile "$LOGFILE" \
+              -quit \
+              -username "$UNITY_EMAIL" \
+              -password "$UNITY_PASSWORD" \
+              -projectPath "/BlankProject"
+            REAL_EXIT=$?
+            cat "$LOGFILE"
+            if [[ $REAL_EXIT -eq 0 ]]; then
+              echo "Step 2: credential-only activation succeeded (exit 0). License written to disk."
+              ACTIVATION_SUCCESS=true
+              rm -f "$LOGFILE"
+              break
+            else
+              ((retry_count++))
+              echo "::warning ::Step 2 attempt $retry_count failed (exit $REAL_EXIT). Retrying in $delay seconds..."
+              rm -f "$LOGFILE"
+              sleep $delay
+              delay=$((delay * 2))
+            fi
+          done
+          if [[ "$ACTIVATION_SUCCESS" != "true" ]]; then
+            echo "::error ::Step 2 (credential-only activation) failed after $retry_count attempts."
+            echo "::error ::There was an error while trying to activate the Unity license."
+            exit 1
+          fi
+
           echo "Activation complete."
           PATCHEOF
           chmod +x "$SCRIPT"
@@ -190,44 +204,62 @@ jobs:
           #!/usr/bin/env bash
           if [[ ! -d "/BlankProject" ]]; then mkdir /BlankProject; fi
           if [[ ! -d "/BlankProject/Assets" ]]; then mkdir /BlankProject/Assets; fi
-          if [[ -n "$UNITY_EMAIL" && -n "$UNITY_PASSWORD" ]]; then
-            echo "Requesting activation (Unity 6 Personal – serial path for account entitlement lookup)"
-            retry_count=0
-            delay=15
-            ACTIVATION_SUCCESS=false
-            while [[ $retry_count -lt 5 ]]; do
-              LOGFILE=$(mktemp /tmp/unity_act.XXXXXX)
-              unity-editor \
-                -logFile "$LOGFILE" \
-                -quit \
-                -username "$UNITY_EMAIL" \
-                -password "$UNITY_PASSWORD" \
-                -serial "${UNITY_SERIAL:-x}" \
-                -projectPath "/BlankProject" || true
-              cat "$LOGFILE"
-              if grep -q "Successfully activated the entitlement license" "$LOGFILE"; then
-                echo "Entitlement found and activated (Code 20110 serial mismatch is expected for Unity 6 Personal – tolerated)."
-                ACTIVATION_SUCCESS=true
-                rm -f "$LOGFILE"
-                break
-              else
-                rm -f "$LOGFILE"
-                ((retry_count++))
-                echo "::warning ::Entitlement not found (Code 404), retry #$retry_count"
-                echo "Retrying in $delay seconds..."
-                sleep $delay
-                delay=$((delay * 2))
-              fi
-            done
-            if [[ "$ACTIVATION_SUCCESS" != "true" ]]; then
-              echo "Activation failed: entitlement was never found after 5 attempts."
-              echo "::error ::There was an error while trying to activate the Unity license."
-              exit 1
-            fi
-          else
+          if [[ -z "$UNITY_EMAIL" || -z "$UNITY_PASSWORD" ]]; then
             echo "::error ::UNITY_EMAIL and UNITY_PASSWORD must be set."
             exit 1
           fi
+
+          echo "=== Step 1: machine registration via serial path ==="
+          LOGFILE=$(mktemp /tmp/unity_act1.XXXXXX)
+          unity-editor \
+            -logFile "$LOGFILE" \
+            -quit \
+            -username "$UNITY_EMAIL" \
+            -password "$UNITY_PASSWORD" \
+            -serial "${UNITY_SERIAL:-x}" \
+            -projectPath "/BlankProject" || true
+          cat "$LOGFILE"
+          if ! grep -q "Successfully activated the entitlement license" "$LOGFILE"; then
+            echo "::error ::Step 1 failed: entitlement was not found via serial path."
+            rm -f "$LOGFILE"
+            exit 1
+          fi
+          echo "Step 1 complete: machine registered (Code 20110 serial mismatch tolerated)."
+          rm -f "$LOGFILE"
+
+          echo "=== Step 2: credential-only activation (machine is now registered) ==="
+          retry_count=0
+          delay=5
+          ACTIVATION_SUCCESS=false
+          while [[ $retry_count -lt 3 ]]; do
+            LOGFILE=$(mktemp /tmp/unity_act2.XXXXXX)
+            unity-editor \
+              -logFile "$LOGFILE" \
+              -quit \
+              -username "$UNITY_EMAIL" \
+              -password "$UNITY_PASSWORD" \
+              -projectPath "/BlankProject"
+            REAL_EXIT=$?
+            cat "$LOGFILE"
+            if [[ $REAL_EXIT -eq 0 ]]; then
+              echo "Step 2: credential-only activation succeeded (exit 0). License written to disk."
+              ACTIVATION_SUCCESS=true
+              rm -f "$LOGFILE"
+              break
+            else
+              ((retry_count++))
+              echo "::warning ::Step 2 attempt $retry_count failed (exit $REAL_EXIT). Retrying in $delay seconds..."
+              rm -f "$LOGFILE"
+              sleep $delay
+              delay=$((delay * 2))
+            fi
+          done
+          if [[ "$ACTIVATION_SUCCESS" != "true" ]]; then
+            echo "::error ::Step 2 (credential-only activation) failed after $retry_count attempts."
+            echo "::error ::There was an error while trying to activate the Unity license."
+            exit 1
+          fi
+
           echo "Activation complete."
           PATCHEOF
           chmod +x "$SCRIPT"
