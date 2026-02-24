@@ -38,48 +38,62 @@ jobs:
           lfs: true
           fetch-depth: 0
 
-      # Cache the Library folder so Unity doesn't reimport everything each run
+      # Cache the Library folder so Unity doesn't reimport everything each run.
+      # The cache key includes the OS so a Linux cache is never restored on Windows.
       - name: Cache Unity Library
         uses: actions/cache@v4
         with:
           path: Library
-          key: Library-${{ matrix.testMode }}-${{ hashFiles('Assets/**', 'Packages/**', 'ProjectSettings/**') }}
+          key: Library-Windows-${{ matrix.testMode }}-${{ hashFiles('Assets/**', 'Packages/**', 'ProjectSettings/**') }}
           restore-keys: |
-            Library-${{ matrix.testMode }}-
-            Library-
+            Library-Windows-${{ matrix.testMode }}-
+            Library-Windows-
 
-      # Run the Unity Test Runner in batch mode (no activation needed — Unity is
-      # already licensed on this machine from your normal Unity Hub login)
+      # Run the Unity Test Runner in batch mode.
+      # Unity is already licensed on this machine via Unity Hub — no activation needed.
+      # We use Start-Process -Wait -PassThru because Unity.exe is a GUI-subsystem binary;
+      # the & call operator does not reliably block until a GUI process exits.
       - name: Run ${{ matrix.testMode }} tests
         shell: powershell
         run: |
-          $unityExe  = $env:UNITY_PATH
+          $unityExe   = $env:UNITY_PATH
           $projectPath = $env:GITHUB_WORKSPACE
-          $resultsDir  = "$projectPath\TestResults\${{ matrix.testMode }}"
-          $logFile     = "$projectPath\unity-test-${{ matrix.testMode }}.log"
+          $testMode    = "${{ matrix.testMode }}"
+          $resultsDir  = "$projectPath\TestResults\$testMode"
+          $logFile     = "$projectPath\unity-test-$testMode.log"
 
           New-Item -ItemType Directory -Force -Path $resultsDir | Out-Null
 
-          & "$unityExe" `
-            -batchmode `
-            -nographics `
-            -projectPath "$projectPath" `
-            -runTests `
-            -testPlatform ${{ matrix.testMode }} `
-            -testResults  "$resultsDir\results.xml" `
-            -logFile      "$logFile" `
-            -quit
+          Write-Host "Launching Unity $testMode tests..."
+          Write-Host "  Project : $projectPath"
+          Write-Host "  Results : $resultsDir\results.xml"
+          Write-Host "  Log     : $logFile"
 
-          $exitCode = $LASTEXITCODE
+          $proc = Start-Process `
+            -FilePath   $unityExe `
+            -ArgumentList @(
+              "-batchmode",
+              "-nographics",
+              "-projectPath", $projectPath,
+              "-runTests",
+              "-testPlatform", $testMode,
+              "-testResults",  "$resultsDir\results.xml",
+              "-logFile",      $logFile,
+              "-quit"
+            ) `
+            -Wait -PassThru -NoNewWindow
 
-          # Always print the Unity log so failures are visible in the Actions UI
+          $exitCode = $proc.ExitCode
+          Write-Host "Unity exited with code: $exitCode"
+
+          # Stream the log so the output appears in GitHub Actions
           if (Test-Path $logFile) { Get-Content $logFile }
 
-          # Exit code 2 = tests ran but some failed (still a legitimate result to upload)
+          # Exit code 2 = tests ran but some failed (still a valid run — upload results)
           if ($exitCode -eq 2) {
             Write-Warning "Some tests failed (Unity exit code 2)."
           } elseif ($exitCode -ne 0) {
-            Write-Error "Unity exited with code $exitCode"
+            Write-Error "Unity exited with unexpected code $exitCode"
             exit $exitCode
           }
 
@@ -113,32 +127,43 @@ jobs:
         uses: actions/cache@v4
         with:
           path: Library
-          key: Library-Build-${{ hashFiles('Assets/**', 'Packages/**', 'ProjectSettings/**') }}
+          key: Library-Windows-Build-${{ hashFiles('Assets/**', 'Packages/**', 'ProjectSettings/**') }}
           restore-keys: |
-            Library-Build-
-            Library-
+            Library-Windows-Build-
+            Library-Windows-
 
       # Build the Windows 64-bit standalone player
       - name: Build Windows Standalone
         shell: powershell
         run: |
-          $unityExe   = $env:UNITY_PATH
+          $unityExe    = $env:UNITY_PATH
           $projectPath = $env:GITHUB_WORKSPACE
           $buildDir    = "$projectPath\build\StandaloneWindows64"
           $logFile     = "$projectPath\unity-build.log"
 
           New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
 
-          & "$unityExe" `
-            -batchmode `
-            -nographics `
-            -projectPath  "$projectPath" `
-            -buildWindows64Player "$buildDir\ProjectDino.exe" `
-            -logFile      "$logFile" `
-            -quit
+          Write-Host "Building Windows Standalone..."
+          Write-Host "  Project : $projectPath"
+          Write-Host "  Output  : $buildDir\ProjectDino.exe"
 
-          $exitCode = $LASTEXITCODE
+          $proc = Start-Process `
+            -FilePath   $unityExe `
+            -ArgumentList @(
+              "-batchmode",
+              "-nographics",
+              "-projectPath",         $projectPath,
+              "-buildWindows64Player", "$buildDir\ProjectDino.exe",
+              "-logFile",             $logFile,
+              "-quit"
+            ) `
+            -Wait -PassThru -NoNewWindow
+
+          $exitCode = $proc.ExitCode
+          Write-Host "Unity exited with code: $exitCode"
+
           if (Test-Path $logFile) { Get-Content $logFile }
+
           if ($exitCode -ne 0) {
             Write-Error "Unity build failed with exit code $exitCode"
             exit $exitCode
