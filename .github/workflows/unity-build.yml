@@ -12,7 +12,8 @@ on:
   workflow_dispatch:
 
 env:
-  UNITY_VERSION: 6000.3.9f1
+  # Path to Unity.exe on your self-hosted runner machine
+  UNITY_PATH: C:\Program Files\Unity\Hub\Editor\6000.3.9f1\Editor\Unity.exe
 
 jobs:
   # ─────────────────────────────────────────────────────────────
@@ -20,7 +21,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────
   test:
     name: Run Unity Tests (${{ matrix.testMode }})
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Windows, X64]
 
     strategy:
       fail-fast: false
@@ -30,12 +31,14 @@ jobs:
           - PlayMode
 
     steps:
+      # Check out the repo, pulling Git LFS files too
       - name: Checkout repository (with Git LFS)
         uses: actions/checkout@v4
         with:
           lfs: true
           fetch-depth: 0
 
+      # Cache the Library folder so Unity doesn't reimport everything each run
       - name: Cache Unity Library
         uses: actions/cache@v4
         with:
@@ -45,122 +48,48 @@ jobs:
             Library-${{ matrix.testMode }}-
             Library-
 
-      # Pre-create the directories Unity's LicensingClient writes to inside Docker.
-      # game-ci mounts _github_home as /root in the container, so files written here
-      # persist across unity-editor invocations within the same job.
-      - name: Prepare Unity license directories and place entitlement file
-        run: |
-          GITHUB_HOME="/home/runner/work/_temp/_github_home"
-          mkdir -p "$GITHUB_HOME/.local/share/unity3d/licenses"
-          mkdir -p "$GITHUB_HOME/.cache/unity3d"
-          # Place license at the Linux equivalent of %LOCALAPPDATA%\Unity\licenses\
-          printf '%s' "$UNITY_LICENSE" > "$GITHUB_HOME/.local/share/unity3d/licenses/UnityEntitlementLicense.xml"
-          # Also place in game-ci's unity-config mount (/usr/share/unity3d/config/ inside container)
-          printf '%s' "$UNITY_LICENSE" > /home/runner/work/_actions/game-ci/unity-test-runner/v4/dist/unity-config/UnityEntitlementLicense.xml
-        env:
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
-
-      # Patch game-ci's activate.sh with a two-step strategy for Unity 6 Personal licenses.
-      #
-      # Background:
-      #   - game-ci passes UNITY_SERIAL=x (no real serial in UnityEntitlementLicense.xml).
-      #   - Step 1 (serial path): -serial "x" triggers an account-based server lookup that finds
-      #     the Personal plan's entitlements (including com.unity.editor.headless) and REGISTERS
-      #     the CI machine on Unity's licensing server. Code 20110 (serial invalid) is returned,
-      #     but the machine registration PERSISTS on the server (confirmed by deactivate.sh which
-      #     "Successfully returned the entitlement license" after tests finish).
-      #   - Step 2 (credential-only): With the machine now registered, a credential-only
-      #     activation (no serial) should authenticate, find the machine registration, and exit 0.
-      #     This writes the license state to disk in /root/.local/share/unity3d/ (persisted via
-      #     the _github_home volume mount), which the test runner's separate LicensingClient
-      #     process can then read without needing credentials.
-      - name: Patch game-ci activate.sh for Unity 6 Personal License
-        run: |
-          SCRIPT="/home/runner/work/_actions/game-ci/unity-test-runner/v4/dist/platforms/ubuntu/activate.sh"
-          cat > "$SCRIPT" << 'PATCHEOF'
-          #!/usr/bin/env bash
-          if [[ -z "$UNITY_EMAIL" || -z "$UNITY_PASSWORD" ]]; then
-            echo "::error ::UNITY_EMAIL and UNITY_PASSWORD must be set."
-            exit 1
-          fi
-
-          # ── Step 1: Register this machine via the serial/account-based lookup ──────────
-          echo "=== Step 1: machine registration via serial path ==="
-          LOGFILE=$(mktemp /tmp/unity_act1.XXXXXX)
-          unity-editor \
-            -logFile "$LOGFILE" \
-            -quit \
-            -username "$UNITY_EMAIL" \
-            -password "$UNITY_PASSWORD" \
-            -serial "${UNITY_SERIAL:-x}" \
-            -projectPath "/BlankProject" || true
-          cat "$LOGFILE"
-          if ! grep -q "Successfully activated the entitlement license" "$LOGFILE"; then
-            echo "::error ::Step 1 failed: entitlement was not found via serial path."
-            rm -f "$LOGFILE"
-            exit 1
-          fi
-          echo "Step 1 complete: machine registered on Unity's server (Code 20110 serial mismatch is expected and tolerated)."
-          rm -f "$LOGFILE"
-
-          # ── Step 2: Credential-only activation now that the machine is registered ──────
-          echo "=== Step 2: credential-only activation (machine is now registered) ==="
-          retry_count=0
-          delay=5
-          ACTIVATION_SUCCESS=false
-          while [[ $retry_count -lt 3 ]]; do
-            LOGFILE=$(mktemp /tmp/unity_act2.XXXXXX)
-            unity-editor \
-              -logFile "$LOGFILE" \
-              -quit \
-              -username "$UNITY_EMAIL" \
-              -password "$UNITY_PASSWORD" \
-              -projectPath "/BlankProject"
-            REAL_EXIT=$?
-            cat "$LOGFILE"
-            if [[ $REAL_EXIT -eq 0 ]]; then
-              echo "Step 2: credential-only activation succeeded (exit 0). License written to disk."
-              ACTIVATION_SUCCESS=true
-              rm -f "$LOGFILE"
-              break
-            else
-              ((retry_count++))
-              echo "::warning ::Step 2 attempt $retry_count failed (exit $REAL_EXIT). Retrying in $delay seconds..."
-              rm -f "$LOGFILE"
-              sleep $delay
-              delay=$((delay * 2))
-            fi
-          done
-          if [[ "$ACTIVATION_SUCCESS" != "true" ]]; then
-            echo "::error ::Step 2 (credential-only activation) failed after $retry_count attempts."
-            echo "::error ::There was an error while trying to activate the Unity license."
-            exit 1
-          fi
-
-          echo "Activation complete."
-          PATCHEOF
-          chmod +x "$SCRIPT"
-
+      # Run the Unity Test Runner in batch mode (no activation needed — Unity is
+      # already licensed on this machine from your normal Unity Hub login)
       - name: Run ${{ matrix.testMode }} tests
-        uses: game-ci/unity-test-runner@v4
-        id: tests
-        env:
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
-          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
-          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
-        with:
-          unityVersion: ${{ env.UNITY_VERSION }}
-          testMode: ${{ matrix.testMode }}
-          artifactsPath: TestResults/${{ matrix.testMode }}
-          githubToken: ${{ secrets.GITHUB_TOKEN }}
-          checkName: ${{ matrix.testMode }} Test Results
+        shell: powershell
+        run: |
+          $unityExe  = $env:UNITY_PATH
+          $projectPath = $env:GITHUB_WORKSPACE
+          $resultsDir  = "$projectPath\TestResults\${{ matrix.testMode }}"
+          $logFile     = "$projectPath\unity-test-${{ matrix.testMode }}.log"
 
+          New-Item -ItemType Directory -Force -Path $resultsDir | Out-Null
+
+          & "$unityExe" `
+            -batchmode `
+            -nographics `
+            -projectPath "$projectPath" `
+            -runTests `
+            -testPlatform ${{ matrix.testMode }} `
+            -testResults  "$resultsDir\results.xml" `
+            -logFile      "$logFile" `
+            -quit
+
+          $exitCode = $LASTEXITCODE
+
+          # Always print the Unity log so failures are visible in the Actions UI
+          if (Test-Path $logFile) { Get-Content $logFile }
+
+          # Exit code 2 = tests ran but some failed (still a legitimate result to upload)
+          if ($exitCode -eq 2) {
+            Write-Warning "Some tests failed (Unity exit code 2)."
+          } elseif ($exitCode -ne 0) {
+            Write-Error "Unity exited with code $exitCode"
+            exit $exitCode
+          }
+
+      # Upload the NUnit XML so GitHub shows a test-results summary
       - name: Upload test results
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: TestResults-${{ matrix.testMode }}
-          path: ${{ steps.tests.outputs.artifactsPath }}
+          path: TestResults/${{ matrix.testMode }}
           retention-days: 14
 
   # ─────────────────────────────────────────────────────────────
@@ -168,16 +97,18 @@ jobs:
   # ─────────────────────────────────────────────────────────────
   build:
     name: Build – Windows Standalone
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Windows, X64]
     needs: test
 
     steps:
+      # Check out the repo, pulling Git LFS files too
       - name: Checkout repository (with Git LFS)
         uses: actions/checkout@v4
         with:
           lfs: true
           fetch-depth: 0
 
+      # Cache the Library folder
       - name: Cache Unity Library
         uses: actions/cache@v4
         with:
@@ -187,94 +118,33 @@ jobs:
             Library-Build-
             Library-
 
-      - name: Prepare Unity license directories and place entitlement file
-        run: |
-          GITHUB_HOME="/home/runner/work/_temp/_github_home"
-          mkdir -p "$GITHUB_HOME/.local/share/unity3d/licenses"
-          mkdir -p "$GITHUB_HOME/.cache/unity3d"
-          printf '%s' "$UNITY_LICENSE" > "$GITHUB_HOME/.local/share/unity3d/licenses/UnityEntitlementLicense.xml"
-          printf '%s' "$UNITY_LICENSE" > /home/runner/work/_actions/game-ci/unity-builder/v4/dist/unity-config/UnityEntitlementLicense.xml
-        env:
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
-
-      - name: Patch game-ci activate.sh for Unity 6 Personal License
-        run: |
-          SCRIPT="/home/runner/work/_actions/game-ci/unity-builder/v4/dist/platforms/ubuntu/steps/activate.sh"
-          cat > "$SCRIPT" << 'PATCHEOF'
-          #!/usr/bin/env bash
-          if [[ ! -d "/BlankProject" ]]; then mkdir /BlankProject; fi
-          if [[ ! -d "/BlankProject/Assets" ]]; then mkdir /BlankProject/Assets; fi
-          if [[ -z "$UNITY_EMAIL" || -z "$UNITY_PASSWORD" ]]; then
-            echo "::error ::UNITY_EMAIL and UNITY_PASSWORD must be set."
-            exit 1
-          fi
-
-          echo "=== Step 1: machine registration via serial path ==="
-          LOGFILE=$(mktemp /tmp/unity_act1.XXXXXX)
-          unity-editor \
-            -logFile "$LOGFILE" \
-            -quit \
-            -username "$UNITY_EMAIL" \
-            -password "$UNITY_PASSWORD" \
-            -serial "${UNITY_SERIAL:-x}" \
-            -projectPath "/BlankProject" || true
-          cat "$LOGFILE"
-          if ! grep -q "Successfully activated the entitlement license" "$LOGFILE"; then
-            echo "::error ::Step 1 failed: entitlement was not found via serial path."
-            rm -f "$LOGFILE"
-            exit 1
-          fi
-          echo "Step 1 complete: machine registered (Code 20110 serial mismatch tolerated)."
-          rm -f "$LOGFILE"
-
-          echo "=== Step 2: credential-only activation (machine is now registered) ==="
-          retry_count=0
-          delay=5
-          ACTIVATION_SUCCESS=false
-          while [[ $retry_count -lt 3 ]]; do
-            LOGFILE=$(mktemp /tmp/unity_act2.XXXXXX)
-            unity-editor \
-              -logFile "$LOGFILE" \
-              -quit \
-              -username "$UNITY_EMAIL" \
-              -password "$UNITY_PASSWORD" \
-              -projectPath "/BlankProject"
-            REAL_EXIT=$?
-            cat "$LOGFILE"
-            if [[ $REAL_EXIT -eq 0 ]]; then
-              echo "Step 2: credential-only activation succeeded (exit 0). License written to disk."
-              ACTIVATION_SUCCESS=true
-              rm -f "$LOGFILE"
-              break
-            else
-              ((retry_count++))
-              echo "::warning ::Step 2 attempt $retry_count failed (exit $REAL_EXIT). Retrying in $delay seconds..."
-              rm -f "$LOGFILE"
-              sleep $delay
-              delay=$((delay * 2))
-            fi
-          done
-          if [[ "$ACTIVATION_SUCCESS" != "true" ]]; then
-            echo "::error ::Step 2 (credential-only activation) failed after $retry_count attempts."
-            echo "::error ::There was an error while trying to activate the Unity license."
-            exit 1
-          fi
-
-          echo "Activation complete."
-          PATCHEOF
-          chmod +x "$SCRIPT"
-
+      # Build the Windows 64-bit standalone player
       - name: Build Windows Standalone
-        uses: game-ci/unity-builder@v4
-        env:
-          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
-          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
-          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
-        with:
-          unityVersion: ${{ env.UNITY_VERSION }}
-          targetPlatform: StandaloneWindows64
-          buildsPath: build
+        shell: powershell
+        run: |
+          $unityExe   = $env:UNITY_PATH
+          $projectPath = $env:GITHUB_WORKSPACE
+          $buildDir    = "$projectPath\build\StandaloneWindows64"
+          $logFile     = "$projectPath\unity-build.log"
 
+          New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
+
+          & "$unityExe" `
+            -batchmode `
+            -nographics `
+            -projectPath  "$projectPath" `
+            -buildWindows64Player "$buildDir\ProjectDino.exe" `
+            -logFile      "$logFile" `
+            -quit
+
+          $exitCode = $LASTEXITCODE
+          if (Test-Path $logFile) { Get-Content $logFile }
+          if ($exitCode -ne 0) {
+            Write-Error "Unity build failed with exit code $exitCode"
+            exit $exitCode
+          }
+
+      # Upload the finished build as a downloadable artifact
       - name: Upload Windows build artifact
         uses: actions/upload-artifact@v4
         with:
