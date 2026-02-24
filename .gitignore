@@ -76,6 +76,14 @@ crashlytics-build.properties
 Thumbs.db
 Desktop.ini
 
+# Unity license / activation artifacts (never commit these)
+*.alf
+*.ulf
+activation.log
+manual_activation.log
+unity-test-*.log
+unity-build.log
+
 # Plastic SCM (in case there are any remnants)
 .plastic/
 ignore.conf
