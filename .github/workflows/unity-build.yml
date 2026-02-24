@@ -1,6 +1,5 @@
 name: Unity CI
 
-# Trigger on pushes to main and on all pull requests
 on:
   push:
     branches:
@@ -46,73 +45,85 @@ jobs:
             Library-${{ matrix.testMode }}-
             Library-
 
-      # Place the UnityEntitlementLicense.xml onto the host filesystem before Docker runs.
-      # game-ci mounts /home/runner/work/_temp/_github_home as /root inside the container.
-      # Unity 6's LicensingClient looks for the entitlement license at
-      # ~/.local/share/unity3d/licenses/ (Linux equivalent of %LOCALAPPDATA%\Unity\licenses\).
-      # Without the file present, LicensingClient falls back to an online machine-bound lookup
-      # which fails in CI (different machine than where the license was originally issued).
-      # With the file present, LicensingClient reads the entitlements locally, finds
-      # com.unity.editor.headless, and activation succeeds.
-      - name: Place Unity entitlement license for offline activation
+      # Pre-create the directories Unity's LicensingClient writes to inside Docker.
+      # game-ci mounts _github_home as /root in the container, so files written here
+      # persist across unity-editor invocations within the same job.
+      - name: Prepare Unity license directories and place entitlement file
         run: |
           GITHUB_HOME="/home/runner/work/_temp/_github_home"
           mkdir -p "$GITHUB_HOME/.local/share/unity3d/licenses"
           mkdir -p "$GITHUB_HOME/.cache/unity3d"
+          # Place license at the Linux equivalent of %LOCALAPPDATA%\Unity\licenses\
           printf '%s' "$UNITY_LICENSE" > "$GITHUB_HOME/.local/share/unity3d/licenses/UnityEntitlementLicense.xml"
-          # Also place in game-ci's unity-config volume mount (/usr/share/unity3d/config/ in container)
+          # Also place in game-ci's unity-config mount (/usr/share/unity3d/config/ inside container)
           printf '%s' "$UNITY_LICENSE" > /home/runner/work/_actions/game-ci/unity-test-runner/v4/dist/unity-config/UnityEntitlementLicense.xml
         env:
           UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
 
-      # Patch game-ci's activate.sh to remove the -serial flag.
-      # game-ci extracts a garbage serial ("x") from UnityEntitlementLicense.xml and passes
-      # it as -serial "x". Without this patch, Unity validates the serial and fails (Code 20110).
-      # With this patch, Unity authenticates with email/password only, finds the local license
-      # file placed in the step above, and activates via entitlement.
+      # Patch game-ci's activate.sh with a strategy that works for Unity 6 Personal licenses.
+      #
+      # Background:
+      #   - game-ci passes UNITY_SERIAL=x to the container (extracted from UnityEntitlementLicense.xml
+      #     which has no real serial, so game-ci falls back to "x").
+      #   - Original activate.sh uses -serial "x" which triggers Unity's account-based entitlement
+      #     lookup. The lookup SUCCEEDS ("Successfully activated the entitlement license") because
+      #     the server uses email/password auth to find the account's Personal plan entitlements.
+      #     BUT THEN Unity validates the serial "x" → fails with Code 20110 (serial invalid).
+      #   - Our previous fix removed -serial, using email+password only. But without a serial,
+      #     Unity's server does a machine-ID lookup instead of account lookup, and the CI runner's
+      #     machine ID has no registered entitlements → Code 404.
+      #
+      # New strategy:
+      #   - Keep -serial "$UNITY_SERIAL" (which is "x") to trigger the account-based entitlement lookup.
+      #   - Capture the log and check for "Successfully activated the entitlement license".
+      #   - If found, exit 0 immediately (tolerate Code 20110; the LicensingClient wrote its state).
+      #   - If not found (genuine Code 404 / network issue), retry up to 5 times.
+      #   - The test runner (run_tests.sh, same Docker container) will find whatever the
+      #     LicensingClient wrote to /root/.local/share/unity3d/ during the activation window.
       - name: Patch game-ci activate.sh for Unity 6 Personal License
         run: |
           SCRIPT="/home/runner/work/_actions/game-ci/unity-test-runner/v4/dist/platforms/ubuntu/activate.sh"
           cat > "$SCRIPT" << 'PATCHEOF'
           #!/usr/bin/env bash
           if [[ -n "$UNITY_EMAIL" && -n "$UNITY_PASSWORD" ]]; then
-            echo "Requesting activation (Unity 6 Personal – entitlement, no serial)"
+            echo "Requesting activation (Unity 6 Personal – serial path for account entitlement lookup)"
             retry_count=0
             delay=15
+            ACTIVATION_SUCCESS=false
             while [[ $retry_count -lt 5 ]]; do
+              LOGFILE=$(mktemp /tmp/unity_act.XXXXXX)
               unity-editor \
-                -logFile /dev/stdout \
+                -logFile "$LOGFILE" \
                 -quit \
                 -username "$UNITY_EMAIL" \
                 -password "$UNITY_PASSWORD" \
-                -projectPath "/BlankProject"
-              UNITY_EXIT_CODE=$?
-              if [[ $UNITY_EXIT_CODE -eq 0 ]]; then
-                echo "Activation successful"
+                -serial "${UNITY_SERIAL:-x}" \
+                -projectPath "/BlankProject" || true
+              cat "$LOGFILE"
+              if grep -q "Successfully activated the entitlement license" "$LOGFILE"; then
+                echo "Entitlement found and activated (Code 20110 serial mismatch is expected for Unity 6 Personal – tolerated)."
+                ACTIVATION_SUCCESS=true
+                rm -f "$LOGFILE"
                 break
               else
+                rm -f "$LOGFILE"
                 ((retry_count++))
-                echo "::warning ::Activation failed, attempting retry #$retry_count"
-                echo "Activation failed, retrying in $delay seconds..."
+                echo "::warning ::Entitlement not found (Code 404), retry #$retry_count"
+                echo "Retrying in $delay seconds..."
                 sleep $delay
                 delay=$((delay * 2))
               fi
             done
-            if [[ $retry_count -eq 5 ]]; then
-              echo "Activation failed after 5 retries"
+            if [[ "$ACTIVATION_SUCCESS" != "true" ]]; then
+              echo "Activation failed: entitlement was never found after 5 attempts."
+              echo "::error ::There was an error while trying to activate the Unity license."
+              exit 1
             fi
           else
             echo "::error ::UNITY_EMAIL and UNITY_PASSWORD must be set."
             exit 1
           fi
-          if [[ $UNITY_EXIT_CODE -eq 0 ]]; then
-            echo "Activation complete."
-          else
-            echo "Unclassified error occurred while trying to activate license."
-            echo "Exit code was: $UNITY_EXIT_CODE"
-            echo "::error ::There was an error while trying to activate the Unity license."
-            exit $UNITY_EXIT_CODE
-          fi
+          echo "Activation complete."
           PATCHEOF
           chmod +x "$SCRIPT"
 
@@ -162,7 +173,7 @@ jobs:
             Library-Build-
             Library-
 
-      - name: Place Unity entitlement license for offline activation
+      - name: Prepare Unity license directories and place entitlement file
         run: |
           GITHUB_HOME="/home/runner/work/_temp/_github_home"
           mkdir -p "$GITHUB_HOME/.local/share/unity3d/licenses"
@@ -180,43 +191,44 @@ jobs:
           if [[ ! -d "/BlankProject" ]]; then mkdir /BlankProject; fi
           if [[ ! -d "/BlankProject/Assets" ]]; then mkdir /BlankProject/Assets; fi
           if [[ -n "$UNITY_EMAIL" && -n "$UNITY_PASSWORD" ]]; then
-            echo "Requesting activation (Unity 6 Personal – entitlement, no serial)"
+            echo "Requesting activation (Unity 6 Personal – serial path for account entitlement lookup)"
             retry_count=0
             delay=15
+            ACTIVATION_SUCCESS=false
             while [[ $retry_count -lt 5 ]]; do
+              LOGFILE=$(mktemp /tmp/unity_act.XXXXXX)
               unity-editor \
-                -logFile /dev/stdout \
+                -logFile "$LOGFILE" \
                 -quit \
                 -username "$UNITY_EMAIL" \
                 -password "$UNITY_PASSWORD" \
-                -projectPath "/BlankProject"
-              UNITY_EXIT_CODE=$?
-              if [[ $UNITY_EXIT_CODE -eq 0 ]]; then
-                echo "Activation successful"
+                -serial "${UNITY_SERIAL:-x}" \
+                -projectPath "/BlankProject" || true
+              cat "$LOGFILE"
+              if grep -q "Successfully activated the entitlement license" "$LOGFILE"; then
+                echo "Entitlement found and activated (Code 20110 serial mismatch is expected for Unity 6 Personal – tolerated)."
+                ACTIVATION_SUCCESS=true
+                rm -f "$LOGFILE"
                 break
               else
+                rm -f "$LOGFILE"
                 ((retry_count++))
-                echo "::warning ::Activation failed, attempting retry #$retry_count"
-                echo "Activation failed, retrying in $delay seconds..."
+                echo "::warning ::Entitlement not found (Code 404), retry #$retry_count"
+                echo "Retrying in $delay seconds..."
                 sleep $delay
                 delay=$((delay * 2))
               fi
             done
-            if [[ $retry_count -eq 5 ]]; then
-              echo "Activation failed after 5 retries"
+            if [[ "$ACTIVATION_SUCCESS" != "true" ]]; then
+              echo "Activation failed: entitlement was never found after 5 attempts."
+              echo "::error ::There was an error while trying to activate the Unity license."
+              exit 1
             fi
           else
             echo "::error ::UNITY_EMAIL and UNITY_PASSWORD must be set."
             exit 1
           fi
-          if [[ $UNITY_EXIT_CODE -eq 0 ]]; then
-            echo "Activation complete."
-          else
-            echo "Unclassified error occurred while trying to activate license."
-            echo "Exit code was: $UNITY_EXIT_CODE"
-            echo "::error ::There was an error while trying to activate the Unity license."
-            exit $UNITY_EXIT_CODE
-          fi
+          echo "Activation complete."
           PATCHEOF
           chmod +x "$SCRIPT"
 
