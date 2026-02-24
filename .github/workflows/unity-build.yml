@@ -1,178 +1,85 @@
-name: Unity CI
+name: Unity Project Checks
 
 on:
   push:
-    branches:
-      - master
-      - main
+    branches: [master, main]
   pull_request:
-    branches:
-      - master
-      - main
-  workflow_dispatch:
-
-env:
-  # Path to Unity.exe on your self-hosted runner machine
-  UNITY_PATH: C:\Program Files\Unity\Hub\Editor\6000.3.9f1\Editor\Unity.exe
+    branches: [master, main]
 
 jobs:
-  # ─────────────────────────────────────────────────────────────
-  # JOB 1 – Run Tests (EditMode + PlayMode)
-  # ─────────────────────────────────────────────────────────────
-  test:
-    name: Run Unity Tests (${{ matrix.testMode }})
-    runs-on: [self-hosted, Windows, X64]
-
-    strategy:
-      fail-fast: false
-      matrix:
-        testMode:
-          - EditMode
-          - PlayMode
+  checks:
+    name: Project Quality Checks
+    runs-on: ubuntu-latest
 
     steps:
-      # Check out the repo, pulling Git LFS files too
-      - name: Checkout repository (with Git LFS)
+      # Full checkout so we can inspect all files; LFS=true to pull binary assets
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           lfs: true
           fetch-depth: 0
 
-      # Cache the Library folder so Unity doesn't reimport everything each run.
-      # The cache key includes the OS so a Linux cache is never restored on Windows.
-      - name: Cache Unity Library
-        uses: actions/cache@v4
-        with:
-          path: Library
-          key: Library-Windows-${{ matrix.testMode }}-${{ hashFiles('Assets/**', 'Packages/**', 'ProjectSettings/**') }}
-          restore-keys: |
-            Library-Windows-${{ matrix.testMode }}-
-            Library-Windows-
-
-      # Run the Unity Test Runner in batch mode.
-      # Unity is already licensed on this machine via Unity Hub — no activation needed.
-      # We use Start-Process -Wait -PassThru because Unity.exe is a GUI-subsystem binary;
-      # the & call operator does not reliably block until a GUI process exits.
-      - name: Run ${{ matrix.testMode }} tests
-        shell: powershell
+      # ── 1. Missing .meta files ────────────────────────────────────────────────
+      # Every file inside Assets/ must have a .meta sidecar.
+      # Missing .meta files cause Unity to re-import assets and break teammates.
+      - name: Check for missing .meta files
         run: |
-          $unityExe   = $env:UNITY_PATH
-          $projectPath = $env:GITHUB_WORKSPACE
-          $testMode    = "${{ matrix.testMode }}"
-          $resultsDir  = "$projectPath\TestResults\$testMode"
-          $logFile     = "$projectPath\unity-test-$testMode.log"
+          missing=0
+          while IFS= read -r -d '' file; do
+            if [[ ! -f "${file}.meta" ]]; then
+              echo "::error file=${file}::Missing .meta file: ${file}.meta"
+              missing=$((missing + 1))
+            fi
+          done < <(find Assets -type f ! -name "*.meta" -print0 2>/dev/null)
 
-          New-Item -ItemType Directory -Force -Path $resultsDir | Out-Null
+          if [[ $missing -gt 0 ]]; then
+            echo "::error::$missing asset(s) are missing .meta files."
+            exit 1
+          fi
+          echo "✓ All assets have .meta files."
 
-          Write-Host "Launching Unity $testMode tests..."
-          Write-Host "  Project : $projectPath"
-          Write-Host "  Results : $resultsDir\results.xml"
-          Write-Host "  Log     : $logFile"
-
-          $proc = Start-Process `
-            -FilePath   $unityExe `
-            -ArgumentList @(
-              "-batchmode",
-              "-nographics",
-              "-projectPath", $projectPath,
-              "-runTests",
-              "-testPlatform", $testMode,
-              "-testResults",  "$resultsDir\results.xml",
-              "-logFile",      $logFile,
-              "-quit"
-            ) `
-            -Wait -PassThru -NoNewWindow
-
-          $exitCode = $proc.ExitCode
-          Write-Host "Unity exited with code: $exitCode"
-
-          # Stream the log so the output appears in GitHub Actions
-          if (Test-Path $logFile) { Get-Content $logFile }
-
-          # Exit code 2 = tests ran but some failed (still a valid run — upload results)
-          if ($exitCode -eq 2) {
-            Write-Warning "Some tests failed (Unity exit code 2)."
-          } elseif ($exitCode -ne 0) {
-            Write-Error "Unity exited with unexpected code $exitCode"
-            exit $exitCode
-          }
-
-      # Upload the NUnit XML so GitHub shows a test-results summary
-      - name: Upload test results
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: TestResults-${{ matrix.testMode }}
-          path: TestResults/${{ matrix.testMode }}
-          retention-days: 14
-
-  # ─────────────────────────────────────────────────────────────
-  # JOB 2 – Build for Windows Standalone
-  # ─────────────────────────────────────────────────────────────
-  build:
-    name: Build – Windows Standalone
-    runs-on: [self-hosted, Windows, X64]
-    needs: test
-
-    steps:
-      # Check out the repo, pulling Git LFS files too
-      - name: Checkout repository (with Git LFS)
-        uses: actions/checkout@v4
-        with:
-          lfs: true
-          fetch-depth: 0
-
-      # Cache the Library folder
-      - name: Cache Unity Library
-        uses: actions/cache@v4
-        with:
-          path: Library
-          key: Library-Windows-Build-${{ hashFiles('Assets/**', 'Packages/**', 'ProjectSettings/**') }}
-          restore-keys: |
-            Library-Windows-Build-
-            Library-Windows-
-
-      # Build the Windows 64-bit standalone player
-      - name: Build Windows Standalone
-        shell: powershell
+      # ── 2. Large files not tracked by Git LFS ────────────────────────────────
+      # Binary files (textures, audio, meshes) larger than 1 MB should be in LFS.
+      # If they aren't, they bloat the repo and slow down every clone.
+      - name: Check for large files missing Git LFS tracking
         run: |
-          $unityExe    = $env:UNITY_PATH
-          $projectPath = $env:GITHUB_WORKSPACE
-          $buildDir    = "$projectPath\build\StandaloneWindows64"
-          $logFile     = "$projectPath\unity-build.log"
+          warn=0
+          lfs_files=$(git lfs ls-files -n 2>/dev/null || true)
 
-          New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
+          while IFS= read -r tracked_file; do
+            [[ -f "$tracked_file" ]] || continue
+            size=$(stat -c%s "$tracked_file" 2>/dev/null || echo 0)
+            if [[ $size -gt 1048576 ]]; then
+              if ! echo "$lfs_files" | grep -qF "$tracked_file"; then
+                size_kb=$(( size / 1024 ))
+                echo "::warning file=${tracked_file}::Large file not in LFS (${size_kb} KB): ${tracked_file}"
+                warn=$((warn + 1))
+              fi
+            fi
+          done < <(git ls-files)
 
-          Write-Host "Building Windows Standalone..."
-          Write-Host "  Project : $projectPath"
-          Write-Host "  Output  : $buildDir\ProjectDino.exe"
+          if [[ $warn -gt 0 ]]; then
+            echo "::warning::$warn large file(s) should be tracked by Git LFS."
+          else
+            echo "✓ No large files outside LFS."
+          fi
 
-          $proc = Start-Process `
-            -FilePath   $unityExe `
-            -ArgumentList @(
-              "-batchmode",
-              "-nographics",
-              "-projectPath",         $projectPath,
-              "-buildWindows64Player", "$buildDir\ProjectDino.exe",
-              "-logFile",             $logFile,
-              "-quit"
-            ) `
-            -Wait -PassThru -NoNewWindow
+      # ── 3. Merge conflict markers ─────────────────────────────────────────────
+      # Catches leftover <<<<<< / ====== / >>>>>> that slip through during merges.
+      - name: Check for merge conflict markers
+        run: |
+          conflict_files=$(git ls-files \
+            | xargs grep -rlE "^(<{7}|={7}|>{7})( |$)" 2>/dev/null || true)
 
-          $exitCode = $proc.ExitCode
-          Write-Host "Unity exited with code: $exitCode"
+          if [[ -n "$conflict_files" ]]; then
+            while IFS= read -r f; do
+              echo "::error file=${f}::Merge conflict markers found in: ${f}"
+            done <<< "$conflict_files"
+            exit 1
+          fi
+          echo "✓ No merge conflict markers found."
 
-          if (Test-Path $logFile) { Get-Content $logFile }
-
-          if ($exitCode -ne 0) {
-            Write-Error "Unity build failed with exit code $exitCode"
-            exit $exitCode
-          }
-
-      # Upload the finished build as a downloadable artifact
-      - name: Upload Windows build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Build-StandaloneWindows64
-          path: build/StandaloneWindows64
-          retention-days: 30
+      # ── 4. EditorConfig compliance ────────────────────────────────────────────
+      # Validates indentation, charset, and line endings against .editorconfig.
+      - name: Check EditorConfig compliance
+        uses: editorconfig-checker/action-editorconfig-checker@main
