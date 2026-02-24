@@ -12,16 +12,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Full checkout so we can inspect all files; LFS=true to pull binary assets
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           lfs: true
           fetch-depth: 0
 
-      # ── 1. Missing .meta files ────────────────────────────────────────────────
-      # Every file inside Assets/ must have a .meta sidecar.
-      # Missing .meta files cause Unity to re-import assets and break teammates.
       - name: Check for missing .meta files
         run: |
           missing=0
@@ -38,9 +34,6 @@ jobs:
           fi
           echo "✓ All assets have .meta files."
 
-      # ── 2. Large files not tracked by Git LFS ────────────────────────────────
-      # Binary files (textures, audio, meshes) larger than 1 MB should be in LFS.
-      # If they aren't, they bloat the repo and slow down every clone.
       - name: Check for large files missing Git LFS tracking
         run: |
           warn=0
@@ -64,8 +57,6 @@ jobs:
             echo "✓ No large files outside LFS."
           fi
 
-      # ── 3. Merge conflict markers ─────────────────────────────────────────────
-      # Catches leftover <<<<<< / ====== / >>>>>> that slip through during merges.
       - name: Check for merge conflict markers
         run: |
           conflict_files=$(git ls-files \
@@ -79,7 +70,5 @@ jobs:
           fi
           echo "✓ No merge conflict markers found."
 
-      # ── 4. EditorConfig compliance ────────────────────────────────────────────
-      # Validates indentation, charset, and line endings against .editorconfig.
       - name: Check EditorConfig compliance
         uses: editorconfig-checker/action-editorconfig-checker@main
